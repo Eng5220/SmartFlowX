@@ -1,96 +1,94 @@
 #pragma once
 
-#include "IHardwareDevice.h"
-#include "IFlowMeter.h"
-
 #include <atomic>
 #include <chrono>
 #include <functional>
-#include <optional>
-#include <string>
+#include <memory>
 #include <thread>
-
+#include <string>
+#include <iostream>
 #include <gpiod.hpp>
 
-/**
- * @brief YF-S401 hall-effect flow sensor driver.
- *
- * Uses libgpiod v2 to detect falling edges (pulses) on the sensor's
- * signal pin in a dedicated thread (blocking I/O, no polling).
- *
- * Each pulse corresponds to a fixed volume of water (mlPerPulse).
- * The accumulated count is exposed via a poll-safe atomic API so that
- * FillingController can query volume without locking.
- *
- * Software debouncing rejects pulses spaced closer than DEBOUNCE_MS apart.
- * At the YF-S401's maximum flow rate (6 L/min) real pulses are ~10 ms apart,
- * so a 5 ms debounce window filters motor-induced EMI without losing real data.
- *
- * Inherits IHardwareDevice for SOLID Liskov substitutability.
- */
-class FlowMeter : public IHardwareDevice, public IFlowMeter {
+
+class FlowSensor {
 public:
-    /**
-     * @param chipNo      GPIO chip number (0 for Pi 1-4, 4 for Pi 5).
-     * @param pinNo       BCM pin connected to sensor signal output.
-     * @param mlPerPulse  Volume per pulse in millilitres (default 1.0 ml).
-     */
-    FlowMeter(unsigned int chipNo, unsigned int pinNo, float mlPerPulse = 1.0f)
-        : chipNo_(chipNo), pinNo_(pinNo), mlPerPulse_(mlPerPulse) {}
+    using FlowCallback = std::function<void(float)>;
 
-    FlowMeter(const FlowMeter&) = delete;
-    FlowMeter& operator=(const FlowMeter&) = delete;
-    FlowMeter(FlowMeter&&) = delete;
-    FlowMeter& operator=(FlowMeter&&) = delete;
+    FlowSensor(unsigned int chipNo, unsigned int pinNo, float cal = 98.0f)
+        : chipNo_(chipNo), pinNo_(pinNo), calibrationFactor_(cal) {}
 
-    ~FlowMeter() override { shutdown(); }
+    ~FlowSensor() { stop(); }
 
-    // ── IHardwareDevice interface ────────────────────────────────────────────
+    void registerFlowCallback(FlowCallback cb) { flowCallback_ = std::move(cb); }
 
-    /** @brief Set up GPIO and launch pulse-counting thread. */
-    bool init() override;
+    void start() {
+        if (running_) return;
+        setupGpio();
+        running_ = true;
+        pulseCount_ = 0;
+        sampleStart_ = std::chrono::steady_clock::now();
+        edgeThread_ = std::thread(&FlowSensor::edgeWorker, this);
+        rateThread_ = std::thread(&FlowSensor::rateWorker, this);
+    }
 
-    /** @brief Stop thread and release GPIO resources. */
-    void shutdown() override;
-
-    // ── Flow data API (safe to call from any thread) ─────────────────────────
-
-    /** @brief Reset the pulse counter to zero (call before a new fill). */
-    void resetCount() override;
-
-    /** @brief Current pulse count since last reset. */
-    int getPulseCount() const override;
-
-    /** @brief Accumulated volume in millilitres since last reset. */
-    double getVolumeML() const override;
-
-#ifdef AQUAFLOW_TESTING
-    /** @brief Test seam for unit tests to inject a synthetic pulse count. */
-    void injectPulseCountForTest(int pulseCount);
-#endif
+    void stop() {
+        if (!running_) return;
+        running_ = false;
+        if (edgeThread_.joinable()) edgeThread_.join();
+        if (rateThread_.joinable()) rateThread_.join();
+    }
 
 private:
-    void setupGpio();
+    void setupGpio() {
+        const std::string chipPath = "/dev/gpiochip" + std::to_string(chipNo_);
+        chip_ = std::make_shared<gpiod::chip>(chipPath);
+        
+        gpiod::line_config lineCfg;
+        lineCfg.add_line_settings({pinNo_},
+            gpiod::line_settings()
+                .set_direction(gpiod::line::direction::INPUT)
+                .set_edge_detection(gpiod::line::edge::FALLING));
 
-    /** @brief Background thread: blocks on GPIO edge events, increments counter. */
-    void edgeWorker();
+        auto builder = chip_->prepare_request();
+        builder.set_consumer("flow_sensor");
+        builder.set_line_config(lineCfg);
+        request_ = std::make_shared<gpiod::line_request>(builder.do_request());
+    }
 
-    unsigned int chipNo_;
-    unsigned int pinNo_;
-    float mlPerPulse_;
+    void edgeWorker() {
+        while (running_) {
+            if (request_->wait_edge_events(std::chrono::milliseconds(200))) {
+                gpiod::edge_event_buffer buffer(8);
+                std::size_t num = request_->read_edge_events(buffer);
+                for (size_t i = 0; i < num; ++i) {
+                    if (buffer.get_event(i).event_type() == gpiod::edge_event::event_type::FALLING_EDGE) {
+                        pulseCount_++;
+                    }
+                }
+            }
+        }
+    }
 
-    // Minimum time between valid pulses (ms).
-    // YF-S401 max flow = 6 L/min → ~98 pulses/sec → ~10 ms between pulses.
-    // 5 ms rejects motor-EMI noise bursts while passing all real flow pulses.
-    static constexpr int DEBOUNCE_MS = 5;
+    void rateWorker() {
+        while (running_) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            auto now = std::chrono::steady_clock::now();
+            std::chrono::duration<float> dt = now - sampleStart_;
+            sampleStart_ = now;
 
+            unsigned long pulses = pulseCount_.exchange(0);
+            float freq = (dt.count() > 0) ? (static_cast<float>(pulses) / dt.count()) : 0;
+            if (flowCallback_) flowCallback_(freq / calibrationFactor_);
+        }
+    }
+
+    unsigned int chipNo_, pinNo_;
+    float calibrationFactor_;
     std::atomic<bool> running_{false};
-    std::atomic<int>  pulseCount_{0};
-
-    // Only ever written/read by edgeWorker — no atomic needed
-    std::chrono::steady_clock::time_point lastPulseTime_{};
-
-    std::thread edgeThread_;
-    std::optional<gpiod::chip>         chip_;
-    std::optional<gpiod::line_request> request_;
+    std::atomic<unsigned long> pulseCount_{0};
+    std::chrono::steady_clock::time_point sampleStart_;
+    FlowCallback flowCallback_;
+    std::thread edgeThread_, rateThread_;
+    std::shared_ptr<gpiod::chip> chip_;
+    std::shared_ptr<gpiod::line_request> request_;
 };

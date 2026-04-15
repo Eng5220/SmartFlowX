@@ -1,72 +1,90 @@
 #include "PinConfig.h"
-#include "app/AquaFlowApp.h"
-#include "hardware/GestureSensor.h"
+#include "hardware/UltrasonicSensor.h"
 #include "hardware/PumpController.h"
 #include "hardware/FlowMeter.h"
-#include "hardware/LcdDisplay.h"
-#include "utils/Logger.h"
+#include "state/FillingController.h"
 
+#include <lgpio.h>
+#include <iostream>
+#include <thread>
+#include <chrono>
 #include <csignal>
-#include <signal.h>
+#include <atomic>
+
+// ─── Graceful shutdown on Ctrl+C (matches Python: except KeyboardInterrupt) ──
+static std::atomic<bool> running(true);
+
+void signalHandler(int signum) {
+    std::cout << "\nMeasurement stopped by User\n";
+    running = false;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
-    // ── Construct hardware drivers ────────────────────────────────────────────
-    GestureSensor    gestureSensor(GESTURE_I2C_BUS, GESTURE_I2C_ADDR, GESTURE_THRESHOLD);
-    PumpController   pump(GPIO_CHIP_NO, PUMP_PIN);
-    FlowMeter        flowMeter(GPIO_CHIP_NO, FLOW_PIN, static_cast<float>(ML_PER_PULSE));
-    LcdDisplay       lcd(LCD_I2C_BUS, LCD_I2C_ADDRESS);
+    // Register Ctrl+C handler
+    std::signal(SIGINT, signalHandler);
 
-    // ── Initialise hardware ───────────────────────────────────────────────────
-    if (!gestureSensor.init()) {
-        Logger::error("Failed to initialise GestureSensor");
+    // --- Open GPIO chip (matches Python: h = GPIO.gpiochip_open(0)) ---
+    int handle = lgGpiochipOpen(GPIO_CHIP);
+    if (handle < 0) {
+        std::cerr << "ERROR: Failed to open GPIO chip " << GPIO_CHIP << "\n";
+        return 1;
+    }
+    std::cout << "GPIO chip opened (handle=" << handle << ")\n";
+
+    // --- Create hardware objects ---
+    UltrasonicSensor sensor(handle, TRIG_PIN, ECHO_PIN);
+    PumpController pump(handle, PUMP_PIN);
+    FlowMeter flowMeter(handle, FLOW_PIN, ML_PER_PULSE);
+
+    // --- Initialise hardware ---
+    if (!sensor.init()) {
+        lgGpiochipClose(handle);
         return 1;
     }
     if (!pump.init()) {
-        Logger::error("Failed to initialise PumpController");
-        gestureSensor.shutdown();
+        sensor.shutdown();
+        lgGpiochipClose(handle);
         return 1;
     }
     if (!flowMeter.init()) {
-        Logger::error("Failed to initialise FlowMeter");
         pump.shutdown();
-        gestureSensor.shutdown();
+        sensor.shutdown();
+        lgGpiochipClose(handle);
         return 1;
     }
-    if (!lcd.init()) {
-        Logger::error("Failed to initialise LcdDisplay — continuing without display");
+
+    // --- Create the state machine ---
+    FillingController controller(sensor, pump, flowMeter,
+                                  TARGET_DISTANCE_CM,
+                                  DISTANCE_TOLERANCE_CM,
+                                  HOLD_TIME_SECONDS,
+                                  TARGET_VOLUME_ML);
+
+    std::cout << "\n=== SmartFlowX Filling Machine Started ===\n";
+    std::cout << "Target distance: " << TARGET_DISTANCE_CM << " cm (±"
+              << DISTANCE_TOLERANCE_CM << " cm)\n";
+    std::cout << "Hold time: " << HOLD_TIME_SECONDS << " seconds\n";
+    std::cout << "Target volume: " << TARGET_VOLUME_ML << " ml\n";
+    std::cout << "Flow calibration: " << ML_PER_PULSE << " ml/pulse\n\n";
+
+    // --- Main loop (matches Python: while True, with 1 second sleep) ---
+    while (running) {
+        controller.tick();
+        std::cout << "[State: " << controller.getStateName()
+                  << " | Bottles filled: " << controller.getBottleCount()
+                  << "]\n\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(LOOP_INTERVAL_MS));
     }
 
-    // ── Application Orchestration ─────────────────────────────────────────────
-    AquaFlowApp app(gestureSensor, pump, flowMeter, lcd);
-    
-    Logger::info("=== AquaFlow Filling Machine Started ===");
-    Logger::info("Hold time     : " + std::to_string(HOLD_TIME_SECONDS) + " s");
-    Logger::info("Target volume : " + std::to_string(TARGET_VOLUME_ML) + " ml");
-    Logger::info("Gesture sensor: I2C bus " + std::to_string(GESTURE_I2C_BUS) + ", addr 0x39");
-
-    app.start();
-
-    // ── Block main thread until SIGINT (Ctrl+C) via sigwait ──────────────────
-    sigset_t sigset;
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGINT);
-    sigaddset(&sigset, SIGTERM);
-    pthread_sigmask(SIG_BLOCK, &sigset, nullptr);
-
-    int sig = 0;
-    sigwait(&sigset, &sig);
-    Logger::info("Signal " + std::to_string(sig) + " received — shutting down.");
-
-    // ── Shutdown ─────────────────────────────────────────────────────────────
-    app.shutdown();
-
-    lcd.shutdown();
+    // --- Cleanup (matches Python: finally block) ---
+    std::cout << "\nShutting down...\n";
     flowMeter.shutdown();
     pump.shutdown();
-    gestureSensor.shutdown();
+    sensor.shutdown();
+    lgGpiochipClose(handle);
+    std::cout << "GPIO chip closed. Goodbye.\n";
 
-    Logger::info("AquaFlow stopped. Goodbye.");
     return 0;
 }

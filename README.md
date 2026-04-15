@@ -1,135 +1,160 @@
-# AquaFlow Water Dispenser
+# SmartFlowX💧
 
-![AquaFlow Logo](images/aquaflow_logo.png)
+> **Real-time automated filling system with intelligent level detection and precision flow control.**
 
-AquaFlow is a smart, fully-automated touchless water dispenser built on the Raspberry Pi using C++. It utilizes intelligent hardware monitoring to safely dispense exact volumes of water using proximity detection.
-
-For SOLID compliance, `FillingController` now depends on behavioral interfaces (`IProximitySensor`, `IPump`, `IFlowMeter`) instead of concrete drivers. We considered a template-based variant for zero-overhead static polymorphism, but chose runtime interfaces for clearer architecture and easier assessment traceability; at a 100 ms control interval, virtual dispatch overhead is negligible.
-
-### 🎥 [Watch the End-to-End Demo on YouTube](#) <!-- TODO: Add YT Link -->
-### 📖 [Read our Project Tech Write-up on RS Design Spark](#) <!-- TODO: Add Blog Link -->
-
-## 🛠️ Hardware Connections (Raspberry Pi Pinout)
-
-Below is the definitive hardware wiring guide to connect the sensors and pump to the Raspberry Pi. For a visual representation, please refer to our physical circuit diagram:
-![Hardware Wiring Diagram](physical_layout.png)
-
-> **Note:** Always ensure the Raspberry Pi is powered OFF when altering hardware connections. 
-
-### 1. Gesture/Proximity Sensor (DollaTek APDS-9960)
-This acts as the touchless cup detector. It communicates via the I2C protocol natively over `3.3V`.
-| Sensor Pin | Raspberry Pi Pin | Function |
-| :--- | :--- | :--- |
-| **VCC** | **Pin 1 (3.3V)** | Main Power |
-| **GND** | **Pin 6 (GND)** | Ground |
-| **SDA** | **Pin 3 (GPIO 2)** | I2C Data Line |
-| **SCL** | **Pin 5 (GPIO 3)** | I2C Clock Line |
-| **VL** | **Pin 17 (3.3V)** | Powers the IR LED for proximity |
-
-### 2. Water Flow Sensor (YF-S401)
-Sends digital pulses to precisely measure volume.
-| Sensor Wire Color | Raspberry Pi Pin | Function |
-| :--- | :--- | :--- |
-| **Red** | **Pin 2 (5V)** | Power |
-| **Black** | **Pin 9 (GND)** | Ground |
-| **Yellow** | **Pin 11 (GPIO 17)** | Pulse Signal Line |
-
-### 3. DC Submersible Pump (JT80SL via TIP122 Transistor)
-Driven via a Darlington TIP122 with a flyback diode.
-- **Base**: GPIO 18 (via 1k resistor)
-- **Collector**: Pump Negative (-)
-- **Emitter**: Ground (GND)
-- **Diode**: Across Pump (+) and Collector.
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%205-red.svg)
+![Language](https://img.shields.io/badge/language-C%2B%2B17-blue.svg)
+![OS](https://img.shields.io/badge/OS-Linux%20%28Raspberry%20Pi%20OS%29-green.svg)
+![Status](https://img.shields.io/badge/status-active-brightgreen.svg)
 
 ---
 
-## 🏗️ System Architecture
+## 📌 Overview
 
-The system follows a strict event-driven, non-blocking architecture using `timerfd` and `libgpiod` interrupts. For full class and sequence diagrams, see our detailed [Architecture Documentation](docs/architecture.md).
-
-```mermaid
-graph TD
-    A[Timer Worker] -->|timerfd 100ms| B[FillingController::tick]
-    C[Gesture Worker] -->|timerfd 50ms| B
-    D[Flow Worker] -->|GPIO Interrupt| E[Atomic Pulse Count]
-    B -->|Atomic Read| E
-    B -->|GPIO Write| F[Pump Controller]
-    B -->|Callback| G[LCD Display]
-```
-
-### ⏱️ Real-Time Timing Requirements
-| Requirement | Value | Mechanism |
-| :--- | :--- | :--- |
-| Gesture Poll Interval | 50 ms | `timerfd` (blocking) |
-| State Machine Tick | 100 ms | `timerfd` (blocking) |
-| Flow Interrupt Latency | < 1 ms | `libgpiod` Edge Events |
-| Emergency Stop | < 150 ms | Proximity CLEARED → Pump OFF |
+**SmartFlow** is a real-time automated filling system built in **C++** and running natively on **Linux (Raspberry Pi OS)** on a **Raspberry Pi 5**. It leverages the Pi's GPIO interface to communicate with level sensors and control pumps/valves, delivering a fully automated, precise, and intelligent filling solution — with no manual intervention required.
 
 ---
 
-## 👥 Division of Labor
-| Team Member | Primary Responsibilities |
-| :--- | :--- |
-| **Abdullah Alkabbawi** | Real-Time Architecture, State Machine Logic, Hardware Integration, Multithreading. |
-| **Mushyalpha** | Hardware Specifications, Documentation (ADRs), CAD Design, Integration Testing. |
+## ✨ Features
+
+- 🔄 **Real-Time Level Monitoring** — Continuous polling of liquid levels via GPIO-connected sensors
+- 🧠 **Smart Level Detection** — Threshold-based logic triggers automatic fill and stop actions
+- ⚙️ **Automated Flow Control** — Relay-controlled pump and valve management
+- 📊 **Live Terminal Dashboard** — Real-time status output directly in the Linux terminal
+- 🔔 **Alerts & Notifications** — System warnings for overflow, underflow, and sensor faults
+- 📁 **Data Logging** — CSV-based event and fill history logging
+- 🔌 **GPIO Native Integration** — Direct hardware control via `lgpio` / `gpiod` on Raspberry Pi 5
+- 🧵 **Multithreaded Architecture** — Sensor reading and control logic run on separate threads
 
 ---
 
-## 💰 Bill of Materials (BoM)
-| Item | Cost |
-| :--- | :--- |
-| DollaTek APDS-9960 Gesture Sensor | £4.99 |
-| YF-S401 Water Flow Sensor | £7.45 |
-| JT80SL DC Submersible Pump | £5.20 |
-| TIP122 Transistor + Diode + Resistor Kit | £2.50 |
-| 16x2 I2C LCD Display | £6.10 |
-| Breadboard & Jumper Wires | £3.50 |
-| Silicone Tubing (1m) | £2.00 |
-| **TOTAL** | **£31.74 (Target: < £75)** |
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | C++17 |
+| Hardware | Raspberry Pi 5 |
+| Operating System | Raspberry Pi OS (Linux) |
+| GPIO Library | `lgpio` / `libgpiod` |
+| Build System | CMake 3.16+ |
+| Level Sensor | Ultrasonic (HC-SR04) / Float Switch |
+| Actuator Control | 5V Relay Module (Pump & Valve) |
+| Communication | I2C / GPIO Digital Pins |
+| Data Logging | CSV file logging OR DB for IoT|
+
 
 ---
 
-## 🚀 Build & Run Instructions
+## 🔧 Hardware Requirements
 
-### 1. Fresh Raspberry Pi Installation
-If you are starting from a completely blank Raspberry Pi OS (Bookworm or newer), follow these steps:
-1. **Flash OS:** Flash Raspberry Pi OS (64-bit recommended) onto a MicroSD card using Raspberry Pi Imager. Ensure SSH and Wi-Fi are configured.
-2. **Boot & Connect:** Insert the SD card, boot the Pi, and SSH into it.
-3. **Enable I2C:** Run `sudo raspi-config` -> `Interfacing Options` -> `I2C` -> Enable.
-4. **Clone the Repo:** `git clone https://github.com/mushyalpha/AquaFlow.git && cd AquaFlow`
+| Component | Details |
+|-----------|---------|
+| **Raspberry Pi 5** | 4GB RAM |
+| **Ultrasonic Sensor** | HC-SR04 (level detection) |
+| **Float Switch** | Optional backup level detection |
+| **Relay Module** | 5V single or dual channel |
+| **Water Pump** | 5V/12V DC submersible pump |
+| **Solenoid Valve** | 12V normally-closed valve |
+| **Power Supply** | 5V 5A USB-C (Pi 5) + 12V for actuators |
 
-### 2. Prerequisites
-Run the following exactly as listed to install C++ compilers, CMake, and the standard GPIO driver library:
+---
+
+## 📐 GPIO Pin Mapping
+
+| GPIO Pin | Component | Direction |
+|----------|-----------|-----------|
+| GPIO 17 | HC-SR04 TRIG | Output |
+| GPIO 27 | HC-SR04 ECHO | Input |
+| GPIO 22 | Relay (Pump) | Output |
+| GPIO 23 | Relay (Valve) | Output |
+| GPIO 24 | Float Switch | Input |
+
+> ⚠️ Always use a **voltage divider** on the ECHO pin (HC-SR04 outputs 5V; RPi GPIO is 3.3V max).
+
+---
+
+## 🚀 Getting Started
+
+### 1. Prerequisites
+
+Ensure your Raspberry Pi 5 is running **Raspberry Pi OS (Linux)** and has the following installed:
+
 ```bash
-sudo apt-get update
-sudo apt-get install -y cmake g++ libgpiod-dev libgpiod-doc
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y cmake g++ libgpiod-dev liblgpio-dev
 ```
 
-### 3. Build Instructions
+### 2. Clone the Repository
+
+```bash
+git clone https://github.com/Eng5220/SmartFlowX.git
+cd smartflow
+```
+
+### 3. Build the Project
+
 ```bash
 mkdir build && cd build
 cmake ..
-make -j$(nproc)
+make -j4
 ```
 
-### 4. Running Tests
-You can automatically run all unit tests from the `build` directory:
+### 4. Run SmartFlow
+
 ```bash
-# Run Google Test unit tests
+sudo ./smartflow
+```
+
+> ⚠️ `sudo` is required for GPIO access on Raspberry Pi OS.
+
+---
+
+## 🔄 How It Works
+
+1. **Sensor** reads liquid level every 500ms via the HC-SR04 ultrasonic sensor on GPIO
+2. **Detection Logic** compares the reading against `threshold_high` and `threshold_low`
+3. **Controller** dispatches commands to start or stop the pump/valve via relay
+4. **Actuator** toggles GPIO pins to physically control the pump and solenoid valve
+5. **Logger** records every fill event, level reading, and system alert to a CSV file
+6. **Terminal Dashboard** prints live status, current fill %, and system state
+
+---
+
+## 🧪 Running Tests
+
+```bash
+cd build
 make test
-# OR manually run ctest to view verbose outputs:
-ctest -V
-
-# (Optional) Run hardware integration testing binaries:
-sudo ./hardware_trio_test
-```
-
-### 5. Running the Application
-```bash
-sudo ./filling_machine
+./smartflow_tests
 ```
 
 ---
 
-## 📜 Licensing
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## 🤝 Contributing
+
+Contributions are welcome! Please follow these steps:
+
+1. Fork the repository
+2. Create a new branch (`git checkout -b feature/your-feature`)
+3. Commit your changes (`git commit -m 'Add your feature'`)
+4. Push to the branch (`git push origin feature/your-feature`)
+5. Open a Pull Request
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 📬 Contact
+
+**SmartFlow Team**
+- GitHub: [@Eng5220/SmartFlowX](https://github.com/Eng5220/SmartFlowX)
+- TEAM:20
+<img src="./images/SmartFlowXIcon.png" alt="SmartFlowX Prototype" align="right" width="100">
+---
+
+<p align="center">Built with precision on Raspberry Pi 5. Powered by C++ and Linux. 🐧💡</p>

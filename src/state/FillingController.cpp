@@ -1,95 +1,127 @@
 #include "state/FillingController.h"
 
-#include <chrono>
+#include <iostream>
+#include <iomanip>
 
 using Clock = std::chrono::steady_clock;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-FillingController::FillingController(IProximitySensor& gestureSensor,
-                                     IPump&           pump,
-                                     IFlowMeter&      flowMeter,
-                                     int             holdTimeSeconds,
-                                     double          targetVolumeML)
-    : gestureSensor_(gestureSensor),
+FillingController::FillingController(UltrasonicSensor& sensor,
+                                     PumpController& pump,
+                                     FlowMeter& flowMeter,
+                                     double targetDistanceCM,
+                                     double toleranceCM,
+                                     int holdTimeSeconds,
+                                     double targetVolumeML)
+    : sensor_(sensor),
       pump_(pump),
       flowMeter_(flowMeter),
+      targetDistanceCM_(targetDistanceCM),
+      toleranceCM_(toleranceCM),
       holdTimeSeconds_(holdTimeSeconds),
       targetVolumeML_(targetVolumeML),
       state_(SystemState::WAITING),
       holdStartTime_(),
-      bottleCount_(0),
-      monitorCallback_(nullptr)
+      lastDistance_(-1.0),
+      bottleCount_(0)
 {
-    // Register proximity callback on the sensor abstraction.
-    // Called from the sensor worker thread on proximity state change.
-    // Callback is intentionally minimal: release-store only — no I/O, no blocking.
-    // memory_order_release pairs with the acquire-load in tick() to ensure the
-    // stored value is visible to the Timer thread before it reads it.
-    gestureSensor_.registerEventCallback([this](const GestureEvent& event) {
-        if (event.getState() == ProximityState::PROXIMITY_TRIGGERED) {
-            bottlePresent_.store(true,  std::memory_order_release);
-        } else if (event.getState() == ProximityState::PROXIMITY_CLEARED) {
-            bottlePresent_.store(false, std::memory_order_release);
-        }
-    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 void FillingController::tick() {
+    std::cout << std::fixed << std::setprecision(2);
 
     switch (state_) {
 
-    // ── WAITING: no cup detected yet ─────────────────────────────────────────
+    // ── WAITING: looking for a bottle ────────────────────────────────────────
     case SystemState::WAITING: {
-        // acquire-load pairs with the release-store in the proximity callback
-        if (bottlePresent_.load(std::memory_order_acquire)) {
+        lastDistance_ = sensor_.getDistanceCM();
+
+        if (lastDistance_ < 0) {
+            std::cout << "Sensor timeout\n";
+            return;
+        }
+
+        std::cout << "Measured Distance = " << lastDistance_ << " cm\n";
+
+        if (sensor_.isBottlePresent(targetDistanceCM_, toleranceCM_)) {
+            // Bottle detected — start hold timer
             holdStartTime_ = Clock::now();
             state_ = SystemState::CONFIRMATION;
+            std::cout << targetDistanceCM_ << " cm detected, starting timer...\n";
         }
         break;
     }
 
-    // ── CONFIRMATION: cup must stay present for holdTimeSeconds_ ─────────────
+    // ── CONFIRMATION: bottle must stay stable for holdTimeSeconds_ ───────────
     case SystemState::CONFIRMATION: {
-        if (!bottlePresent_.load(std::memory_order_acquire)) {
-            // Cup removed before timer expired — reset
+        lastDistance_ = sensor_.getDistanceCM();
+
+        if (lastDistance_ < 0) {
+            std::cout << "Sensor timeout, timer reset.\n";
+            state_ = SystemState::WAITING;
+            return;
+        }
+
+        std::cout << "Measured Distance = " << lastDistance_ << " cm\n";
+
+        if (!sensor_.isBottlePresent(targetDistanceCM_, toleranceCM_)) {
+            // Bottle moved away — reset timer
+            std::cout << "Distance moved away from " << targetDistanceCM_
+                      << " cm, timer reset.\n";
             state_ = SystemState::WAITING;
             break;
         }
 
-        if (getHoldElapsed() >= holdTimeSeconds_) {
-            // Confirmed — reset meter and start pump
+        // Bottle still present — check elapsed time
+        double elapsed = getHoldElapsed();
+        std::cout << std::setprecision(1)
+                  << "Held for " << elapsed << " / " << holdTimeSeconds_
+                  << " seconds\n";
+
+        if (elapsed >= holdTimeSeconds_) {
+            // Hold time reached — reset flow counter and start pump
             flowMeter_.resetCount();
             pump_.turnOn();
             state_ = SystemState::FILLING;
+            std::cout << "Bottle confirmed! Starting fill to "
+                      << std::setprecision(0) << targetVolumeML_ << " ml\n";
         }
         break;
     }
 
-    // ── FILLING: pump running, counting flow pulses ───────────────────────────
+    // ── FILLING: pump running, counting flow pulses ──────────────────────────
     case SystemState::FILLING: {
         double currentML = flowMeter_.getVolumeML();
-        if (currentML >= targetVolumeML_) {
+        int pulses = flowMeter_.getPulseCount();
+
+        std::cout << std::setprecision(1)
+                  << "Filling: " << currentML << " ml / "
+                  << targetVolumeML_ << " ml"
+                  << "  (" << pulses << " pulses)\n";
+
+        if (flowMeter_.hasReachedTarget(targetVolumeML_)) {
+            // Target volume reached — stop pump
             pump_.turnOff();
             bottleCount_++;
             state_ = SystemState::FILL_COMPLETE;
+            std::cout << std::setprecision(1)
+                      << "Target reached! Dispensed " << currentML << " ml. "
+                      << "Bottles filled: " << bottleCount_ << "\n";
         }
         break;
     }
 
-    // ── FILL_COMPLETE: pump off, reset for next cup ───────────────────────────
+    // ── FILL_COMPLETE: pump off, ready for next bottle ───────────────────────
     case SystemState::FILL_COMPLETE: {
+        // Reset flow counter for next bottle
         flowMeter_.resetCount();
         state_ = SystemState::WAITING;
+        std::cout << "Fill complete. Waiting for next bottle...\n";
         break;
     }
-    }
-
-    // Notify observer (Monitor + LCD) after every tick — volume updates happen here
-    if (monitorCallback_) {
-        monitorCallback_(getStateName(), flowMeter_.getVolumeML(), bottleCount_);
     }
 }
 
@@ -128,10 +160,3 @@ double FillingController::getTargetVolumeML() const {
 int FillingController::getBottleCount() const {
     return bottleCount_;
 }
-
-#ifdef AQUAFLOW_TESTING
-void FillingController::forceHoldElapsedForTest(double secondsElapsed) {
-    holdStartTime_ = Clock::now() - std::chrono::duration_cast<Clock::duration>(
-        std::chrono::duration<double>(secondsElapsed));
-}
-#endif
