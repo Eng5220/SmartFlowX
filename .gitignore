@@ -46,3 +46,10 @@ googletest-src/
 # Logs and data output
 *.csv
 *.log
+
+# Local issue drafts (raised directly on GitHub, not needed in repo)
+docs/github_issue_apds9960_draft.md
+
+# Adafruit APDS9960 reference library (kept locally for reference only, not compiled)
+src/hardware/Adafruit_APDS9960.cpp
+src/hardware/Adafruit_APDS9960_Library-1.3.1/
